@@ -23,6 +23,7 @@ export async function generateTweetsForSimulation(
   tweetCount: number
 ) {
   console.log(`[${simulationId}] 🚀 Starting generation for ${tweetCount} tweets`);
+  console.log(`[${simulationId}] Idea: "${ideaText.substring(0, 50)}..."`);
 
   try {
     // Generate tweets in one pass
@@ -91,6 +92,16 @@ async function generateTweets(
   audience: string,
   count: number
 ): Promise<Tweet[]> {
+  console.log(`[generateTweets] Starting with count=${count}, audience=${audience}`);
+  
+  // Check if OpenAI key exists
+  if (!process.env.OPENAI_API_KEY) {
+    console.error('❌ OPENAI_API_KEY is not set!');
+    throw new Error('OpenAI API key not configured');
+  }
+  
+  console.log('✅ OpenAI key found, length:', process.env.OPENAI_API_KEY.length);
+
   const systemPrompt = `You are simulating realistic Twitter/X reactions to an idea.
 
 AUDIENCE: ${audience}
@@ -138,22 +149,39 @@ OUTPUT FORMAT (MUST BE VALID JSON):
 
   const userPrompt = `Simulate Twitter reactions to this idea:\n\n"${ideaText}"\n\nGenerate exactly ${count} diverse, realistic tweets.`;
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    temperature: 0.9,
-    response_format: { type: 'json_object' }
-  });
+  console.log('📝 Calling OpenAI API...');
+  
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.9,
+      response_format: { type: 'json_object' },
+      max_tokens: 2000, // Add explicit limit
+      timeout: 30000 // 30 second timeout
+    });
 
-  const response = completion.choices[0].message.content;
-  if (!response) {
-    throw new Error('Empty response from OpenAI');
+    console.log('✅ OpenAI API responded successfully');
+
+    const response = completion.choices[0].message.content;
+    if (!response) {
+      console.error('❌ Empty response from OpenAI');
+      throw new Error('Empty response from OpenAI');
+    }
+
+    console.log('📝 Parsing JSON response...');
+    const parsed = JSON.parse(response);
+    const tweets = parsed.tweets || [];
+    console.log(`✅ Parsed ${tweets.length} tweets`);
+    
+    return tweets;
+  } catch (error: any) {
+    console.error('❌ OpenAI API Error:', error.message);
+    console.error('Full error:', error);
+    throw error;
   }
-
-  const parsed = JSON.parse(response);
-  return parsed.tweets || [];
 }
 

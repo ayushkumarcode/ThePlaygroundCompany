@@ -1,6 +1,7 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { createClient } from '@supabase/supabase-js';
-import { generateTweetsForSimulation } from '../lib/generate-tweets-logic.js';
+import OpenAI from 'openai';
+
 // TEMPORARY: Clerk JWT verification disabled for MVP
 // TODO: Fix @clerk/backend import and JWT verification
 
@@ -9,6 +10,118 @@ const supabase = createClient(
   process.env.VITE_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_KEY!
 );
+
+const openaiKey = process.env.OPENAI_API_KEY;
+console.log('OpenAI key status:', openaiKey ? `Present (${openaiKey.length} chars)` : 'MISSING');
+
+const openai = new OpenAI({
+  apiKey: openaiKey,
+});
+
+// Inline tweet generation function
+async function generateTweetsLogic(
+  simulationId: string,
+  ideaText: string,
+  audience: string,
+  tweetCount: number
+) {
+  console.log(`[${simulationId}] Starting tweet generation for ${tweetCount} tweets`);
+  
+  try {
+    const systemPrompt = `You are simulating how ${audience} would react to a new idea on Twitter/X.
+Generate ${tweetCount} realistic, diverse tweet reactions.
+
+PERSONALITY MIX:
+- Enthusiast (loves it): 25%
+- Skeptic (questions): 20%
+- Technical expert: 20%
+- Encourager: 15%
+- Confused: 10%
+- Contrarian: 10%
+
+OUTPUT JSON FORMAT:
+{
+  "tweets": [
+    {
+      "author": "@username",
+      "text": "tweet content",
+      "sentiment": "praise" | "neutral" | "worry"
+    }
+  ]
+}`;
+
+    const userPrompt = `Generate Twitter reactions to: "${ideaText}"`;
+
+    console.log(`[${simulationId}] Calling OpenAI...`);
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.9,
+      response_format: { type: 'json_object' },
+      max_tokens: 2000
+    }, {
+      timeout: 30000
+    });
+
+    const response = completion.choices[0].message.content;
+    if (!response) throw new Error('Empty response');
+
+    const parsed = JSON.parse(response);
+    const tweets = parsed.tweets || [];
+    
+    console.log(`[${simulationId}] Generated ${tweets.length} tweets`);
+
+    // Save tweets
+    const tweetsToSave = tweets.map((tweet: any, index: number) => ({
+      id: `${simulationId}-${index}`,
+      simulation_id: simulationId,
+      author: tweet.author,
+      content: tweet.text,
+      sentiment: tweet.sentiment,
+      is_reply: false,
+      parent_tweet_id: null,
+      created_at: new Date().toISOString(),
+      engagement_score: Math.floor(Math.random() * 100)
+    }));
+
+    const { error: insertError } = await supabase
+      .from('generated_tweets')
+      .insert(tweetsToSave);
+
+    if (insertError) throw insertError;
+
+    // Update status
+    const { error: updateError } = await supabase
+      .from('simulations')
+      .update({ 
+        status: 'completed',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', simulationId);
+
+    if (updateError) throw updateError;
+
+    console.log(`[${simulationId}] ✅ Generation complete`);
+    return tweets;
+
+  } catch (error: any) {
+    console.error(`[${simulationId}] Failed:`, error);
+    console.error(`[${simulationId}] Error details:`, {
+      message: error.message,
+      status: error.status,
+      code: error.code,
+      type: error.type
+    });
+    await supabase
+      .from('simulations')
+      .update({ status: 'failed' })
+      .eq('id', simulationId);
+    throw error;
+  }
+}
 
 export default async function handler(
   req: VercelRequest,
@@ -98,20 +211,22 @@ export default async function handler(
       .update({ simulation_count: (user!.simulation_count || 0) + 1 })
       .eq('id', user!.id);
 
-    // Trigger LLM generation directly (fire and forget)
-    console.log(`[${simulation.id}] 🚀 Triggering LLM generation directly...`);
+    // Trigger LLM generation directly
+    console.log(`[${simulation.id}] 🚀 Triggering LLM generation...`);
     
-    // Call generation function without awaiting (background processing)
-    generateTweetsForSimulation(
-      simulation.id,
-      ideaText,
-      audience,
-      tweetCount
-    ).catch(err => {
-      console.error(`[${simulation.id}] ❌ Background generation failed:`, err);
-    });
-
-    console.log(`[${simulation.id}] ✅ Generation started in background`);
+    // Try to generate tweets synchronously for debugging
+    try {
+      await generateTweetsLogic(
+        simulation.id,
+        ideaText,
+        audience,
+        tweetCount
+      );
+      console.log(`[${simulation.id}] ✅ Generation completed successfully`);
+    } catch (err) {
+      console.error(`[${simulation.id}] ❌ Generation failed:`, err);
+      // Don't fail the request, just log the error
+    }
 
     res.status(200).json({
       simulationId: simulation.id,
